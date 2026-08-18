@@ -1,6 +1,8 @@
 import { useState, useRef, useEffect } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Sparkles, X, Send, Trash2 } from 'lucide-react';
+import { chatWithCopilot } from '../api/hrApi';
+import { notify } from '../lib/toast';
 
 const STORAGE_KEY = 'cogni-copilot-messages';
 
@@ -10,70 +12,6 @@ const DEFAULT_MESSAGES = [
     text: "Hi! I'm Cogni AI Assistant. Ask me about training strategy, course outlines, quiz design, or improving completion rates — I'll give you a detailed, structured answer.",
   },
 ];
-
-/**
- * Simulated AI response engine. A real integration would POST the message
- * to a backend endpoint that calls the Anthropic API server-side (an API
- * key must never be shipped to the frontend) using a system prompt
- * instructing detailed, structured, non-truncated answers — this
- * client-side version follows that same "be thorough" instruction with
- * template-based canned responses instead of a live model call.
- */
-const CANNED_RESPONSES = [
-  {
-    match: /outline|structure|module/i,
-    reply:
-      "Here's a solid structure for an onboarding or skills course:\n\n" +
-      '1. Company & culture overview — mission, values, how teams work together\n' +
-      '2. Tools & systems walkthrough — the software and processes people touch daily\n' +
-      '3. Role-specific processes — the actual day-to-day workflow for this job\n' +
-      '4. Compliance & policies — anything with legal or safety weight\n' +
-      '5. Knowledge-check quiz after each module, with an 80% passing threshold\n\n' +
-      'Keep each module to 15-20 minutes of content max — attention drops sharply past that, and shorter modules also make it easier to see exactly where learners disengage in your Results Vault data.',
-  },
-  {
-    match: /quiz|question|assess/i,
-    reply:
-      'For assessment design, a good mix looks like:\n\n' +
-      '- 60% multiple-choice — fast to answer, good for recall checks\n' +
-      '- 30% scenario-based — "what would you do if..." tests real application, not memorization\n' +
-      '- 10% short-answer — open reflection, manually reviewed, good for judgment calls\n\n' +
-      'Keep quizzes under 10 questions so they check understanding rather than feel like a final exam. In the AI Quiz Architect you can generate a full draft (5-30 questions) with distractors and explanations pre-filled, then edit before saving — the AI draft is always a starting point, never the final version.',
-  },
-  {
-    match: /engag|completion|drop.?off/i,
-    reply:
-      'Completion rates usually respond to three levers:\n\n' +
-      '1. Shorter lessons (5-10 minutes) — long-form video is the single biggest drop-off cause\n' +
-      '2. Visible progress — a progress bar and "X of Y modules complete" gives people a finish line\n' +
-      '3. A tangible reward on completion — even a simple auto-issued certificate measurably helps\n\n' +
-      'If one specific course has a low completion rate, check the Learner Results & Vault tab — the per-learner drawer shows exactly which module people stall on, which is usually more useful than aggregate stats alone.',
-  },
-  {
-    match: /certificate/i,
-    reply:
-      'Certificates auto-issue the moment a learner hits 100% completion (configurable per-course as "all quizzes passed" or "all lessons complete" in the Certificate Engine tab). You can customize:\n\n' +
-      '- Signature name and title, shown at the bottom of the PDF\n' +
-      '- Dynamic tokens: {learner_name}, {course_name}, {completion_date} — filled in automatically at issue time\n\n' +
-      'Certificates are re-renderable on demand, so changing the signature later applies to future downloads without needing to regenerate anything manually.',
-  },
-  {
-    match: /broadcast|announce|notice/i,
-    reply:
-      'Broadcasts route by audience:\n\n' +
-      '- Your announcements always go to learners_only within your own organization — they can never leak to other companies\n' +
-      '- Super Admin can post company-wide "all" broadcasts (visible to both HR and learners) or "hr_only" ones (visible only in HR dashboards)\n\n' +
-      'Use "urgent" priority sparingly — it renders with a red banner and should be reserved for things like system maintenance windows or mandatory-by-deadline compliance training, not routine updates.',
-  },
-];
-
-const DEFAULT_REPLY =
-  "That's a fair question — I'd start by clarifying the training goal first, then work backward into modules, assessments, and how you'll measure success. Try asking me specifically about course outlines, quiz design, improving completion rates, certificates, or broadcasts, and I'll go deeper on that topic.";
-
-function generateReply(message) {
-  const found = CANNED_RESPONSES.find((r) => r.match.test(message));
-  return found ? found.reply : DEFAULT_REPLY;
-}
 
 function loadPersistedMessages() {
   try {
@@ -103,18 +41,30 @@ export default function CogniCopilot() {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' });
   }, [messages, typing]);
 
-  const handleSend = () => {
+  const handleSend = async () => {
     const trimmed = input.trim();
-    if (!trimmed) return;
+    if (!trimmed || typing) return;
 
-    setMessages((m) => [...m, { role: 'user', text: trimmed }]);
+    const nextMessages = [...messages, { role: 'user', text: trimmed }];
+    setMessages(nextMessages);
     setInput('');
     setTyping(true);
 
-    setTimeout(() => {
-      setMessages((m) => [...m, { role: 'assistant', text: generateReply(trimmed) }]);
+    try {
+      // Send real conversation history (minus the message just added, which
+      // the backend appends itself) so the assistant has multi-turn context.
+      const history = messages.map((m) => ({ role: m.role, content: m.text }));
+      const { data } = await chatWithCopilot({ message: trimmed, history });
+      setMessages((m) => [...m, { role: 'assistant', text: data.data.reply }]);
+    } catch (err) {
+      notify.error(err.response?.data?.message || 'Cogni AI is unavailable right now.');
+      setMessages((m) => [
+        ...m,
+        { role: 'assistant', text: err.response?.data?.message || 'Sorry, I ran into an error. Please try again.' },
+      ]);
+    } finally {
       setTyping(false);
-    }, 900 + Math.random() * 600);
+    }
   };
 
   const handleClearChat = () => {

@@ -5,6 +5,115 @@ const Quiz = require('../models/quiz.model');
 const Course = require('../models/course.model');
 const LearnerProgress = require('../models/learnerProgress.model');
 const { recalculateOverallProgress, issueCertificateIfNeeded } = require('../utils/progressEngine');
+const { generateAIText } = require('../services/aiService');
+
+// ---------------------------------------------------------------------------
+// AI QUIZ ARCHITECT — real model-backed generation
+// ---------------------------------------------------------------------------
+
+/**
+ * @desc    Generates a quiz draft with a real Gemini API call, grounded in
+ *          the ACTUAL selected course module's content (its title,
+ *          description, and every lesson's title/text/media) rather than
+ *          a free-text topic string. This is what makes the output
+ *          genuinely module-relevant instead of generic — the model
+ *          never sees anything except this specific module's real
+ *          content and is instructed to answer strictly from it.
+ *          HR still reviews and edits the draft before saving it as a
+ *          real Quiz; nothing here saves anything itself.
+ * @route   POST /api/v1/quizzes/generate-draft
+ * @access  Private (hr_admin, tenant-scoped)
+ */
+const generateQuizDraft = asyncHandler(async (req, res) => {
+  const { courseId, moduleId, questionCount = 10 } = req.body;
+
+  if (!courseId || !moduleId) {
+    throw new ApiError(400, 'courseId and moduleId are required.');
+  }
+  const count = Math.min(Math.max(parseInt(questionCount, 10) || 10, 1), 30);
+
+  const course = await Course.findOne({ _id: courseId, tenantId: req.tenantId });
+  if (!course) throw new ApiError(404, 'Course not found.');
+
+  const moduleDef = course.modules.find((m) => m._id.toString() === moduleId);
+  if (!moduleDef) throw new ApiError(404, 'Module not found in this course.');
+
+  const lessonSummaries = (moduleDef.lessons || [])
+    .map((l, i) => {
+      const parts = [`Lesson ${i + 1}: "${l.title}"`];
+      if (l.textContent) parts.push(`Content: ${l.textContent.slice(0, 600)}`);
+      if (l.video?.url) parts.push('(this lesson includes a video)');
+      if (l.pdf?.url) parts.push('(this lesson includes a PDF resource)');
+      return parts.join(' — ');
+    })
+    .join('\n');
+
+  const context =
+    `Course: "${course.title}"\n` +
+    (course.description ? `Course description: ${course.description}\n` : '') +
+    `Module: "${moduleDef.title}"\n` +
+    (moduleDef.description ? `Module description: ${moduleDef.description}\n` : '') +
+    `Lessons in this module:\n${lessonSummaries || '(this module has no lesson content yet — base questions on the module and course title/description only)'}`;
+
+  const systemPrompt =
+    'You are an instructional designer writing a multiple-choice quiz for a corporate training module. ' +
+    'You are given the EXACT course, module, and lesson content below — every question must be answerable ' +
+    'strictly from this content. Never invent facts it does not imply, and never include any instructional ' +
+    'or meta text (e.g. a restated prompt) inside a question — only genuine quiz content.\n\n' +
+    'Respond with ONLY a valid JSON array, no markdown code fences, no commentary before or after it. ' +
+    'Each array element must have exactly this shape:\n' +
+    '{"question": string, "options": [string, string, string, string], "correctAnswerIndex": number, "explanation": string}\n\n' +
+    `Generate exactly ${count} questions. Each question must have exactly 4 options — one clearly correct, ` +
+    'three plausible but incorrect. correctAnswerIndex is the 0-based index of the correct option. ' +
+    'explanation is 1-2 sentences justifying why that option is correct.';
+
+  let raw;
+  try {
+    raw = await generateAIText({
+      system: systemPrompt,
+      messages: [{ role: 'user', content: context + '\n\nGenerate the quiz now as a JSON array only.' }],
+      maxTokens: Math.min(700 * count, 8000),
+    });
+  } catch (err) {
+    throw new ApiError(err.statusCode || 502, err.message);
+  }
+
+  const cleaned = raw
+    .trim()
+    .replace(/^```(json)?\s*/i, '')
+    .replace(/```\s*$/i, '');
+
+  let parsed;
+  try {
+    parsed = JSON.parse(cleaned);
+  } catch (err) {
+    throw new ApiError(502, 'The AI response was not valid JSON — please try generating again.');
+  }
+
+  if (!Array.isArray(parsed) || parsed.length === 0) {
+    throw new ApiError(502, 'The AI did not return any questions — please try generating again.');
+  }
+
+  const questions = parsed
+    .filter((q) => q && typeof q.question === 'string' && Array.isArray(q.options) && q.options.length === 4)
+    .map((q) => ({
+      question: q.question,
+      options: q.options.map(String),
+      correctAnswerIndex:
+        Number.isInteger(q.correctAnswerIndex) && q.correctAnswerIndex >= 0 && q.correctAnswerIndex <= 3
+          ? q.correctAnswerIndex
+          : 0,
+      explanation: typeof q.explanation === 'string' ? q.explanation : '',
+    }));
+
+  if (questions.length === 0) {
+    throw new ApiError(502, 'The AI response did not contain any usable questions — please try again.');
+  }
+
+  return res
+    .status(200)
+    .json(new ApiResponse(200, { questions, moduleTitle: moduleDef.title, courseTitle: course.title }));
+});
 
 // ---------------------------------------------------------------------------
 // HR QUIZ MANAGEMENT (CRUD)
@@ -413,6 +522,7 @@ const submitQuiz = asyncHandler(async (req, res) => {
 });
 
 module.exports = {
+  generateQuizDraft,
   createQuiz,
   updateQuiz,
   getQuizById,

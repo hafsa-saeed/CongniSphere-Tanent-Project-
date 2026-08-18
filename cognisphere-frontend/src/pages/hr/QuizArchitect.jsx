@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Sparkles, Plus, Trash2, Save, Wand2 } from 'lucide-react';
 import DashboardLayout from '../../components/layout/DashboardLayout';
 import GlassCard from '../../components/ui/GlassCard';
-import { listCourses, createQuiz } from '../../api/hrApi';
+import { listCourses, createQuiz, generateQuizDraft } from '../../api/hrApi';
 import { notify } from '../../lib/toast';
 
 let optionIdCounter = 0;
@@ -11,122 +11,6 @@ const nextOptionId = () => 'opt-' + optionIdCounter++;
 
 function makeOption(text, isCorrect) {
   return { localId: nextOptionId(), text, isCorrect };
-}
-
-/**
- * Simulated AI draft generator. A real integration would send `topic` and
- * `count` to a backend endpoint that calls the Anthropic API server-side
- * (never expose an API key from the frontend) and return structured
- * question JSON. This produces `count` plausible, clearly-editable draft
- * questions — 4 options per multiple-choice question (1 correct + 3
- * distractors) with a stored explanation — so HR always reviews and
- * corrects the draft before saving; the human-in-the-loop step is
- * mandatory, not optional, by design.
- */
-const TOPIC_ANGLES = [
-  { stem: 'What is the primary objective of {topic}?', correct: 'To ensure employees understand {topic} correctly and apply it consistently', explanation: 'The core goal of any training topic is correct, consistent application on the job — not just passive awareness.' },
-  { stem: 'Which of the following best describes a key principle of {topic}?', correct: 'Consistency and adherence to defined processes', explanation: 'Well-designed processes only deliver value when followed consistently; ad-hoc exceptions undermine the whole point of having a standard.' },
-  { stem: 'What is the most likely consequence of ignoring {topic} guidelines?', correct: 'Increased risk of errors, non-compliance, or safety issues', explanation: 'Guidelines exist specifically to reduce a known risk — skipping them reintroduces that risk.' },
-  { stem: 'Who is primarily responsible for applying {topic} in daily work?', correct: 'Every employee in their own role, not just management', explanation: 'Training programs succeed when ownership is distributed, not centralized in a single role.' },
-  { stem: 'When should an employee escalate a concern related to {topic}?', correct: 'As soon as they notice a potential issue, rather than waiting', explanation: 'Early escalation is almost always cheaper and safer than waiting for a problem to compound.' },
-  { stem: 'What best demonstrates mastery of {topic} in practice?', correct: 'Applying it correctly without needing to be reminded', explanation: 'Passing a quiz shows knowledge; unprompted correct behavior on the job shows mastery.' },
-  { stem: 'Why does {topic} matter to the organization as a whole, not just one team?', correct: 'Because inconsistent practice in one area creates risk that affects everyone', explanation: 'Cross-functional standards break down if only some teams follow them — the whole point is organization-wide consistency.' },
-  { stem: 'What is the first step an employee should take when starting work related to {topic}?', correct: 'Review the current documented process before acting', explanation: 'Acting before checking the current standard is a common source of avoidable errors.' },
-  { stem: 'How should a new employee be brought up to speed on {topic}?', correct: 'Structured onboarding paired with a knowledgeable mentor or supervisor', explanation: 'Ad-hoc, undocumented knowledge transfer is unreliable and inconsistent across new hires.' },
-  { stem: 'What distinguishes a well-run process for {topic} from a poorly-run one?', correct: 'Clear ownership, documented steps, and regular review', explanation: 'Undefined ownership and undocumented steps are the most common causes of process breakdown.' },
-];
-
-const DISTRACTORS = [
-  'To fill training hours with no clear goal',
-  'It has no defined objective or measurable outcome',
-  'Ignoring established guidelines when convenient',
-  'Randomly applying rules without documentation',
-  'Something only management needs to know about',
-  'A one-time requirement with no ongoing relevance',
-];
-
-/**
- * Strips instructional/meta phrasing from whatever HR typed into the
- * topic box before it's embedded into question templates. Without this,
- * a pasted prompt like "generate 10 quizzes for our first module about
- * workplace safety procedures" gets echoed verbatim into every question
- * stem ("What is the primary objective of generate 10 quizzes for our
- * first module about workplace safety procedures?") — this extracts
- * just the actual subject.
- *
- * Two passes, in order of preference:
- *   1. If the text contains an instruction verb (generate/create/write/
- *      need/want/...) ANYWHERE followed later by an "about/on/for/
- *      covering/regarding X" clause, keep only X — this catches phrasing
- *      the fixed-prefix pattern below would miss, e.g. "I need you to
- *      please create a quiz on X" or "can you generate 10 mcqs about X".
- *   2. Otherwise, strip a simple leading "generate/create N quiz(zes)
- *      for/about X" prefix and use what's left.
- */
-function sanitizeTopic(raw) {
-  let t = raw.trim();
-
-  const aboutMatch = t.match(/\b(about|on|for|covering|regarding)\s+(.+)$/i);
-  const hasInstructionVerb = aboutMatch && /\b(generate|create|make|write|build|need|want|please)\b/i.test(t.slice(0, aboutMatch.index));
-
-  if (hasInstructionVerb) {
-    t = aboutMatch[2];
-  } else {
-    const instructionPattern =
-      /^(please\s+)?(i\s+(need|want)\s+(you\s+to\s+)?)?(generate|create|make|write|build)\s+\d*\s*(quiz(zes)?|question(s)?|assessment(s)?|mcqs?)\s*(for|about|on|covering|regarding)?\s*/i;
-    t = t.replace(instructionPattern, '');
-  }
-
-  // Strip a leading "our/the/this Nth module (about/on/...)" phrase too,
-  // in case it survived either pass above or appeared on its own.
-  const modulePattern = /^(our|the|this)\s+(first|second|third|\d+(st|nd|rd|th)?)?\s*module\s*(about|on|for|covering|regarding)?\s*/i;
-  t = t.replace(modulePattern, '');
-
-  // Clean up stray leading/trailing punctuation left over from the cuts above.
-  t = t.replace(/^[\s,.:;-]+|[\s,.:;-]+$/g, '');
-
-  // A real topic/subject shouldn't need to run more than ~80 characters —
-  // anything longer left after the strips above is almost certainly
-  // leftover instructional text, not a clean subject, so truncate defensively.
-  if (t.length > 80) t = t.slice(0, 80).trim();
-
-  return t || 'this topic';
-}
-
-function generateDraftQuestions(topic, count) {
-  const cleanTopic = sanitizeTopic(topic);
-  const questions = [];
-
-  for (let i = 0; i < count; i++) {
-    // Reserve roughly 1 in 5 questions as True/False or short-answer for variety
-    const cycle = i % 5;
-
-    if (cycle === 4) {
-      questions.push({
-        questionText: `True or False: ${cleanTopic} applies to all employees regardless of department.`,
-        questionType: 'true_false',
-        points: 3,
-        explanation: 'Company-wide training topics are, by design, meant to apply broadly unless explicitly scoped to one department.',
-        options: [makeOption('True', true), makeOption('False', false)],
-      });
-      continue;
-    }
-
-    const angle = TOPIC_ANGLES[i % TOPIC_ANGLES.length];
-    const questionText = angle.stem.replace(/\{topic\}/g, cleanTopic);
-    const correctText = angle.correct.replace(/\{topic\}/g, cleanTopic);
-    const shuffledDistractors = [...DISTRACTORS].sort(() => Math.random() - 0.5).slice(0, 3);
-
-    questions.push({
-      questionText,
-      questionType: 'single_choice',
-      points: 5,
-      explanation: angle.explanation.replace(/\{topic\}/g, cleanTopic),
-      options: [makeOption(correctText, true), ...shuffledDistractors.map((d) => makeOption(d, false))],
-    });
-  }
-
-  return questions;
 }
 
 export default function QuizArchitect() {
@@ -138,7 +22,6 @@ export default function QuizArchitect() {
   const [timeLimitMinutes, setTimeLimitMinutes] = useState(10);
   const [maxAttempts, setMaxAttempts] = useState(3);
 
-  const [topic, setTopic] = useState('');
   const [questionCount, setQuestionCount] = useState(10);
   const [generating, setGenerating] = useState(false);
   const [questions, setQuestions] = useState([]);
@@ -149,19 +32,39 @@ export default function QuizArchitect() {
   }, []);
 
   const selectedCourse = courses.find((c) => c._id === courseId);
+  const selectedModule = selectedCourse?.modules?.find((m) => m._id === moduleId);
 
-  const handleGenerate = () => {
-    if (!topic.trim()) {
-      notify.error('Enter a topic or paste a summary first.');
+  /**
+   * Calls the real backend AI endpoint, which pulls the ACTUAL content of
+   * the selected module (its lessons' titles/text/media) and asks Claude
+   * to generate questions grounded strictly in that content — this is
+   * what makes the output module-relevant instead of generic. The AI's
+   * {question, options, correctAnswerIndex, explanation} shape is mapped
+   * into this page's existing editable question/option shape below.
+   */
+  const handleGenerate = async () => {
+    if (!courseId || !moduleId) {
+      notify.error('Select a course and module first — the AI generates questions from that module\'s actual content.');
       return;
     }
     setGenerating(true);
-    setTimeout(() => {
-      setQuestions(generateDraftQuestions(topic, questionCount));
-      setTitle((t) => t || `${sanitizeTopic(topic)} — Knowledge Check`);
+    try {
+      const { data } = await generateQuizDraft({ courseId, moduleId, questionCount });
+      const generated = data.data.questions.map((q) => ({
+        questionText: q.question,
+        questionType: 'single_choice',
+        points: 5,
+        explanation: q.explanation,
+        options: q.options.map((text, i) => makeOption(text, i === q.correctAnswerIndex)),
+      }));
+      setQuestions(generated);
+      setTitle((t) => t || `${data.data.moduleTitle} — Knowledge Check`);
+      notify.success('Draft generated from the module\'s content — review and edit before saving.');
+    } catch (err) {
+      notify.error(err.response?.data?.message || 'Failed to generate quiz. Please try again.');
+    } finally {
       setGenerating(false);
-      notify.success('Draft generated — review and edit before saving.');
-    }, 1400);
+    }
   };
 
   const updateQuestion = (index, patch) => setQuestions((qs) => qs.map((q, i) => (i === index ? { ...q, ...patch } : q)));
@@ -225,7 +128,6 @@ export default function QuizArchitect() {
       notify.success('Quiz saved to course.');
       setQuestions([]);
       setTitle('');
-      setTopic('');
     } catch (err) {
       notify.error(err.response?.data?.message || 'Failed to save quiz.');
     } finally {
@@ -244,13 +146,45 @@ export default function QuizArchitect() {
           <h2 className="font-semibold text-white mb-4 flex items-center gap-2">
             <Sparkles size={16} className="text-indigo-400" /> AI Prompt
           </h2>
-          <textarea
-            placeholder="Enter a topic (e.g. 'Workplace safety procedures') or paste a summary of your training content…"
-            rows={6}
-            value={topic}
-            onChange={(e) => setTopic(e.target.value)}
-            className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-white placeholder-zinc-500 focus:outline-none focus:ring-2 focus:ring-indigo-500 mb-3"
-          />
+          <div className="mb-3">
+            <label className="block text-xs text-zinc-500 mb-1">Course</label>
+            <select
+              value={courseId}
+              onChange={(e) => {
+                setCourseId(e.target.value);
+                setModuleId('');
+              }}
+              className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+            >
+              <option value="">Select a course…</option>
+              {courses.map((c) => (
+                <option key={c._id} value={c._id}>
+                  {c.title}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="mb-3">
+            <label className="block text-xs text-zinc-500 mb-1">Module</label>
+            <select
+              value={moduleId}
+              onChange={(e) => setModuleId(e.target.value)}
+              disabled={!selectedCourse}
+              className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-50"
+            >
+              <option value="">Select a module…</option>
+              {selectedCourse?.modules?.map((m) => (
+                <option key={m._id} value={m._id}>
+                  {m.title}
+                </option>
+              ))}
+            </select>
+            {selectedModule && (
+              <p className="mt-1.5 text-[11px] text-zinc-600">
+                {selectedModule.lessons?.length || 0} lesson(s) in this module will be used as the AI's source content.
+              </p>
+            )}
+          </div>
           <div className="mb-3">
             <label className="block text-xs text-zinc-500 mb-1">Number of questions</label>
             <select
@@ -267,50 +201,17 @@ export default function QuizArchitect() {
           </div>
           <button
             onClick={handleGenerate}
-            disabled={generating}
+            disabled={generating || !courseId || !moduleId}
             className="w-full flex items-center justify-center gap-2 rounded-lg bg-gradient-to-r from-indigo-600 to-violet-600 px-3 py-2.5 text-sm font-medium text-white hover:opacity-90 disabled:opacity-50"
           >
             <Wand2 size={14} /> {generating ? 'Generating…' : 'Generate Quiz with AI'}
           </button>
           <p className="mt-3 text-[11px] text-zinc-600">
-            AI drafts are a starting point — review every question, option, and explanation before saving to your course.
+            The AI reads this module's actual lesson content and generates questions strictly from it — review every
+            question, option, and explanation before saving to your course.
           </p>
 
           <div className="mt-6 pt-5 border-t border-white/10 space-y-3">
-            <div>
-              <label className="block text-xs text-zinc-500 mb-1">Course</label>
-              <select
-                value={courseId}
-                onChange={(e) => {
-                  setCourseId(e.target.value);
-                  setModuleId('');
-                }}
-                className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-              >
-                <option value="">Select a course…</option>
-                {courses.map((c) => (
-                  <option key={c._id} value={c._id}>
-                    {c.title}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="block text-xs text-zinc-500 mb-1">Module</label>
-              <select
-                value={moduleId}
-                onChange={(e) => setModuleId(e.target.value)}
-                disabled={!selectedCourse}
-                className="w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:opacity-50"
-              >
-                <option value="">Select a module…</option>
-                {selectedCourse?.modules?.map((m) => (
-                  <option key={m._id} value={m._id}>
-                    {m.title}
-                  </option>
-                ))}
-              </select>
-            </div>
             <div>
               <label className="block text-xs text-zinc-500 mb-1">Quiz title</label>
               <input
@@ -459,7 +360,7 @@ export default function QuizArchitect() {
           {questions.length === 0 && (
             <GlassCard className="p-10 text-center">
               <Sparkles size={22} className="mx-auto text-zinc-600 mb-3" />
-              <p className="text-sm text-zinc-400">Enter a topic and click "Generate Quiz with AI" to draft your first question set.</p>
+              <p className="text-sm text-zinc-400">Select a course and module, then click "Generate Quiz with AI" to draft your first question set.</p>
             </GlassCard>
           )}
 

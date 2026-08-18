@@ -22,6 +22,7 @@ const auditLogRoutes = require('./routes/auditLog.routes');
 const userRoutes = require('./routes/user.routes');
 const instructorRoutes = require('./routes/instructor.routes');
 const onboardingRequestRoutes = require('./routes/onboardingRequest.routes');
+const copilotRoutes = require('./routes/copilot.routes');
 
 const app = express();
 
@@ -107,6 +108,7 @@ app.use('/api/v1/audit-logs', auditLogRoutes);
 app.use('/api/v1/users', userRoutes);
 app.use('/api/v1/instructors', instructorRoutes);
 app.use('/api/v1/onboarding-requests', onboardingRequestRoutes);
+app.use('/api/v1/copilot', copilotRoutes);
 
 // ---------- 404 fallback ----------
 app.use((req, res) => {

@@ -2,6 +2,7 @@ const express = require('express');
 const { verifyJWT, authorizeRoles } = require('../middleware/auth.middleware');
 const { requireTenant } = require('../middleware/tenant.middleware');
 const {
+  generateQuizDraft,
   createQuiz,
   updateQuiz,
   getQuizById,
@@ -16,6 +17,7 @@ const router = express.Router();
 router.use(verifyJWT, requireTenant);
 
 // ---------- HR management ----------
+router.post('/generate-draft', authorizeRoles('hr_admin'), generateQuizDraft);
 router.post('/', authorizeRoles('hr_admin'), createQuiz);
 router.get('/', authorizeRoles('hr_admin'), getQuizzesForCourse);
 router.get('/:id', authorizeRoles('hr_admin'), getQuizById);
